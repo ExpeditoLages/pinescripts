@@ -41,37 +41,157 @@ atr = ta.atr(atrLen)
 volSma = ta.sma(volume, volSmaLen)
 
 // -----------------------------------------------------------------------------
-// Machine Learning - Feature Engineering & Perceptron Online
+// Machine Learning Profundo (Nativo) - Feature Engineering
 // -----------------------------------------------------------------------------
-// Features normalizadas (-1 a 1)
+// Features normalizadas
 f1 = (ta.rsi(close, 14) - 50) / 50            // Momentum RSI
 f2 = ta.cci(close, 20) / 200                  // Momentum CCI
 f3 = ta.roc(close, 14) / 100                  // Taxa de Variação (ROC)
+f4 = (close - ta.sma(close, 50)) / ta.sma(close, 50) // Distância da média
 
-// Pesos (Weights) e Bias - Inicializados com 0, atualizados em tempo real
-var float w1 = 0.0
-var float w2 = 0.0
-var float w3 = 0.0
-var float bias = 0.0
+// -----------------------------------------------------------------------------
+// Deep Neural Network - Pine Script V5 Nativo (Matrix API)
+// -----------------------------------------------------------------------------
+// Utiliza apenas funções nativas e suportadas `matrix.*`
+// Evita dependências de bibliotecas complexas/externas não documentadas
+// Arquitetura: 4 Inputs -> 4 Hidden (Tanh) -> 1 Output (Linear)
 
-// Predição Atual (Soma Ponderada)
-prediction = (f1 * w1) + (f2 * w2) + (f3 * w3) + bias
-mlBullish = prediction > 0
-mlBearish = prediction < 0
+// Pesos (W1, W2) e Bias (b1, b2) iniciais
+var matrix<float> W1 = matrix.new<float>(4, 4, 0.1)
+var matrix<float> b1 = matrix.new<float>(1, 4, 0.01)
+var matrix<float> W2 = matrix.new<float>(4, 1, -0.1)
+var matrix<float> b2 = matrix.new<float>(1, 1, 0.01)
 
-// Verdadeiro Resultado Ocorreu (Atrasado 1 barra para não repintar e treinar no passado)
-// 1 = O preço subiu na barra seguinte; -1 = O preço caiu na barra seguinte
+// Funções de Ativação Vetorizadas (aplicadas a cada elemento)
+f_tanh(mat) =>
+    rows = matrix.rows(mat)
+    cols = matrix.columns(mat)
+    res = matrix.new<float>(rows, cols)
+    for r = 0 to rows - 1
+        for c = 0 to cols - 1
+            v = matrix.get(mat, r, c)
+            // Limitando (clipping) v para evitar Overflow (NaN) no math.exp
+            v_clipped = math.max(math.min(v, 10.0), -10.0)
+            val = (math.exp(v_clipped) - math.exp(-v_clipped)) / (math.exp(v_clipped) + math.exp(-v_clipped))
+            matrix.set(res, r, c, val)
+    res
+
+f_tanh_deriv(mat) =>
+    rows = matrix.rows(mat)
+    cols = matrix.columns(mat)
+    res = matrix.new<float>(rows, cols)
+    for r = 0 to rows - 1
+        for c = 0 to cols - 1
+            // Derivada de Tanh = 1 - tanh(x)^2. O argumento `mat` aqui já deve ser a saída a1
+            v = matrix.get(mat, r, c)
+            matrix.set(res, r, c, 1.0 - (v * v))
+    res
+
+// Multiplicação ponto a ponto (Hadamard product)
+hadamard(matA, matB) =>
+    rows = matrix.rows(matA)
+    cols = matrix.columns(matA)
+    res = matrix.new<float>(rows, cols)
+    for r = 0 to rows - 1
+        for c = 0 to cols - 1
+            matrix.set(res, r, c, matrix.get(matA, r, c) * matrix.get(matB, r, c))
+    res
+
+// Subtração de matrizes ponto a ponto
+mat_sub(matA, matB) =>
+    rows = matrix.rows(matA)
+    cols = matrix.columns(matA)
+    res = matrix.new<float>(rows, cols)
+    for r = 0 to rows - 1
+        for c = 0 to cols - 1
+            matrix.set(res, r, c, matrix.get(matA, r, c) - matrix.get(matB, r, c))
+    res
+
+// Adição com BroadCasting simplificado (matriz NxM + Bias 1xM)
+add_bias(matA, bias_vec) =>
+    rows = matrix.rows(matA)
+    cols = matrix.columns(matA)
+    res = matrix.new<float>(rows, cols)
+    for r = 0 to rows - 1
+        for c = 0 to cols - 1
+            matrix.set(res, r, c, matrix.get(matA, r, c) + matrix.get(bias_vec, 0, c))
+    res
+
+// 1. Forward Pass Atual
+X_current = matrix.new<float>(1, 4)
+matrix.set(X_current, 0, 0, f1)
+matrix.set(X_current, 0, 1, f2)
+matrix.set(X_current, 0, 2, f3)
+matrix.set(X_current, 0, 3, f4)
+
+var float prediction = 0.0
+
+// Calculo Camada 1: a1 = tanh(X * W1 + b1)
+z1 = add_bias(matrix.mult(X_current, W1), b1)
+a1 = f_tanh(z1)
+
+// Calculo Camada 2: a2 = a1 * W2 + b2 (Saída Linear)
+z2 = add_bias(matrix.mult(a1, W2), b2)
+a2 = z2
+
+prediction := matrix.get(a2, 0, 0)
+mlBullish = prediction > 0.0
+mlBearish = prediction < 0.0
+
+// -----------------------------------------------------------------------------
+// Treinamento Online Manual (Backpropagation Nativo - Sem Repintura)
+// -----------------------------------------------------------------------------
 target = close > close[1] ? 1.0 : -1.0
 
-// Treinamento Online (Stochastic Gradient Descent)
-// Usa a predição da barra ANTERIOR para comparar com o fechamento da barra ATUAL
-// barstate.isconfirmed garante que o treino só ocorra quando a barra fechar (Zero Repintura Intrabarra)
 if barstate.isconfirmed
-    error = target - nz(prediction[1])
-    w1 := w1 + lr * error * nz(f1[1])
-    w2 := w2 + lr * error * nz(f2[1])
-    w3 := w3 + lr * error * nz(f3[1])
-    bias := bias + lr * error
+    // 2. Recupera features do passado para calcular Erro histórico e gradientes
+    X_prev = matrix.new<float>(1, 4)
+    matrix.set(X_prev, 0, 0, nz(f1[1]))
+    matrix.set(X_prev, 0, 1, nz(f2[1]))
+    matrix.set(X_prev, 0, 2, nz(f3[1]))
+    matrix.set(X_prev, 0, 3, nz(f4[1]))
+
+    // Forward Pass no Passado
+    z1_prev = add_bias(matrix.mult(X_prev, W1), b1)
+    a1_prev = f_tanh(z1_prev)
+    z2_prev = add_bias(matrix.mult(a1_prev, W2), b2)
+    pred_prev = matrix.get(z2_prev, 0, 0)
+
+    // Calculo do Erro da Saída (Predição - Alvo real)
+    err_val = pred_prev - target
+
+    // Matriz de Erro da Camada de Saída (dZ2)
+    dZ2 = matrix.new<float>(1, 1, err_val)
+
+    // Gradiente W2 e b2
+    // dW2 = a1^T * dZ2
+    dW2 = matrix.mult(matrix.transpose(a1_prev), dZ2)
+    db2 = matrix.copy(dZ2) // bias soma o gradiente diretamente na camada linear
+
+    // Matriz de Erro da Camada Oculta (dZ1)
+    // dL/da1 = dZ2 * W2^T
+    dL_da1 = matrix.mult(dZ2, matrix.transpose(W2))
+
+    // dZ1 = dL/da1 * deriv_tanh(a1)
+    deriv_t = f_tanh_deriv(a1_prev) // recebe a ativação passada
+    dZ1 = hadamard(dL_da1, deriv_t)
+
+    // Gradiente W1 e b1
+    // dW1 = X^T * dZ1
+    dW1 = matrix.mult(matrix.transpose(X_prev), dZ1)
+    db1 = matrix.copy(dZ1)
+
+    // 3. Atualizar Pesos (Gradient Descent)
+    // W = W - learning_rate * dW
+    lr_W1 = matrix.new<float>(4, 4, lr)
+    lr_W2 = matrix.new<float>(4, 1, lr)
+    lr_b1 = matrix.new<float>(1, 4, lr)
+    lr_b2 = matrix.new<float>(1, 1, lr)
+
+    W1 := mat_sub(W1, hadamard(dW1, lr_W1))
+    b1 := mat_sub(b1, hadamard(db1, lr_b1))
+    W2 := mat_sub(W2, hadamard(dW2, lr_W2))
+    b2 := mat_sub(b2, hadamard(db2, lr_b2))
 
 // -----------------------------------------------------------------------------
 // Lógica da Estratégia (Sem repintura: usando fechamentos confirmados)
