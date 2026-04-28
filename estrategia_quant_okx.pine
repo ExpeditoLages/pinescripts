@@ -18,9 +18,19 @@ rsiOS = input.int(30, title="RSI Sobrevendido", group="Momentum")
 atrLen = input.int(14, title="Período ATR", group="Gestão de Risco")
 slMultiplier = input.float(2.0, title="Multiplicador Stop Loss (ATR)", group="Gestão de Risco", step=0.1)
 tpMultiplier = input.float(4.0, title="Multiplicador Take Profit (ATR)", group="Gestão de Risco", step=0.1)
+useTrailing = input.bool(true, title="Usar Trailing Stop Baseado em ATR?", group="Gestão de Risco")
+trailAtrMultiplier = input.float(1.5, title="Multiplicador do Trailing Stop", group="Gestão de Risco", step=0.1)
+
+// Filtro de Volume
+useVolumeFilter = input.bool(true, title="Usar Filtro de Volume?", group="Filtros Adicionais")
+volSmaLen = input.int(20, title="Período SMA Volume", group="Filtros Adicionais")
+
+// Machine Learning - Perceptron
+useML = input.bool(true, title="Usar Filtro de Machine Learning (Perceptron)?", group="Machine Learning")
+lr = input.float(0.01, title="Taxa de Aprendizado (Learning Rate)", group="Machine Learning", step=0.001)
 
 // -----------------------------------------------------------------------------
-// Indicadores
+// Indicadores Clássicos
 // -----------------------------------------------------------------------------
 emaFast = ta.ema(close, emaFastLen)
 emaSlow = ta.ema(close, emaSlowLen)
@@ -28,21 +38,55 @@ emaMacro = ta.ema(close, emaMacroLen)
 
 rsi = ta.rsi(close, rsiLen)
 atr = ta.atr(atrLen)
+volSma = ta.sma(volume, volSmaLen)
+
+// -----------------------------------------------------------------------------
+// Machine Learning - Feature Engineering & Perceptron Online
+// -----------------------------------------------------------------------------
+// Features normalizadas (-1 a 1)
+f1 = (ta.rsi(close, 14) - 50) / 50            // Momentum RSI
+f2 = ta.cci(close, 20) / 200                  // Momentum CCI
+f3 = ta.roc(close, 14) / 100                  // Taxa de Variação (ROC)
+
+// Pesos (Weights) e Bias - Inicializados com 0, atualizados em tempo real
+var float w1 = 0.0
+var float w2 = 0.0
+var float w3 = 0.0
+var float bias = 0.0
+
+// Predição Atual (Soma Ponderada)
+prediction = (f1 * w1) + (f2 * w2) + (f3 * w3) + bias
+mlBullish = prediction > 0
+mlBearish = prediction < 0
+
+// Verdadeiro Resultado Ocorreu (Atrasado 1 barra para não repintar e treinar no passado)
+// 1 = O preço subiu na barra seguinte; -1 = O preço caiu na barra seguinte
+target = close > close[1] ? 1.0 : -1.0
+
+// Treinamento Online (Stochastic Gradient Descent)
+// Usa a predição da barra ANTERIOR para comparar com o fechamento da barra ATUAL
+// barstate.isconfirmed garante que o treino só ocorra quando a barra fechar (Zero Repintura Intrabarra)
+if barstate.isconfirmed
+    error = target - nz(prediction[1])
+    w1 := w1 + lr * error * nz(f1[1])
+    w2 := w2 + lr * error * nz(f2[1])
+    w3 := w3 + lr * error * nz(f3[1])
+    bias := bias + lr * error
 
 // -----------------------------------------------------------------------------
 // Lógica da Estratégia (Sem repintura: usando fechamentos confirmados)
 // -----------------------------------------------------------------------------
-// Condições para Compra (Long)
-// 1. EMA Rápida cruza acima da EMA Lenta
-// 2. Preço está acima da EMA Macro (Tendência de Alta)
-// 3. RSI não está sobrecomprado
-longCondition = ta.crossover(emaFast, emaSlow) and close > emaMacro and rsi < rsiOB
+// Filtro de Volume
+volCondition = not useVolumeFilter or volume > volSma
 
-// Condições para Venda (Short)
-// 1. EMA Rápida cruza abaixo da EMA Lenta
-// 2. Preço está abaixo da EMA Macro (Tendência de Baixa)
-// 3. RSI não está sobrevendido
-shortCondition = ta.crossunder(emaFast, emaSlow) and close < emaMacro and rsi > rsiOS
+// Lógica Clássica
+classicLong = ta.crossover(emaFast, emaSlow) and close > emaMacro and rsi < rsiOB and volCondition
+classicShort = ta.crossunder(emaFast, emaSlow) and close < emaMacro and rsi > rsiOS and volCondition
+
+// Condições Finais combinando ou não com ML
+// Adicionado barstate.isconfirmed para garantir execução estrita apenas em fechamentos de barra, prevenindo repintura visual
+longCondition = classicLong and (not useML or mlBullish) and barstate.isconfirmed
+shortCondition = classicShort and (not useML or mlBearish) and barstate.isconfirmed
 
 // -----------------------------------------------------------------------------
 // Execução e Gestão de Risco
@@ -51,23 +95,41 @@ var float longSL = na
 var float longTP = na
 var float shortSL = na
 var float shortTP = na
+var float trailingStop = na
 
+// Lógica de Entrada
 if (longCondition and strategy.position_size == 0)
     strategy.entry("Long", strategy.long)
     longSL := close - (atr * slMultiplier)
     longTP := close + (atr * tpMultiplier)
+    trailingStop := na
 
 if (shortCondition and strategy.position_size == 0)
     strategy.entry("Short", strategy.short)
     shortSL := close + (atr * slMultiplier)
     shortTP := close - (atr * tpMultiplier)
+    trailingStop := na
 
-// Lógica de Saída
-if (strategy.position_size > 0)
-    strategy.exit("Sair Long", "Long", stop=longSL, limit=longTP)
+// Lógica de Saída e Trailing Stop (Ativos Imediatamente para evitar janela de vulnerabilidade na entrada)
+if (strategy.position_size > 0 or longCondition)
+    // Atualizar Trailing Stop apenas se o preço se mover a favor da operação
+    if useTrailing
+        tsLevel = close - (atr * trailAtrMultiplier)
+        trailingStop := na(trailingStop) ? tsLevel : math.max(trailingStop, tsLevel)
 
-if (strategy.position_size < 0)
-    strategy.exit("Sair Short", "Short", stop=shortSL, limit=shortTP)
+    // Stop Efetivo é o maior entre o SL inicial e o Trailing Stop
+    effectiveStop = useTrailing and not na(trailingStop) ? math.max(longSL, trailingStop) : longSL
+    strategy.exit("Sair Long", "Long", stop=effectiveStop, limit=longTP)
+
+if (strategy.position_size < 0 or shortCondition)
+    // Atualizar Trailing Stop apenas se o preço se mover a favor da operação
+    if useTrailing
+        tsLevel = close + (atr * trailAtrMultiplier)
+        trailingStop := na(trailingStop) ? tsLevel : math.min(trailingStop, tsLevel)
+
+    // Stop Efetivo é o menor entre o SL inicial e o Trailing Stop
+    effectiveStop = useTrailing and not na(trailingStop) ? math.min(shortSL, trailingStop) : shortSL
+    strategy.exit("Sair Short", "Short", stop=effectiveStop, limit=shortTP)
 
 // -----------------------------------------------------------------------------
 // Plotagem Gráfica
