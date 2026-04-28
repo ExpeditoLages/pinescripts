@@ -1,0 +1,94 @@
+//@version=5
+strategy("BOS 50% Retracement", overlay=true, calc_on_every_tick=false, calc_on_order_fills=false)
+
+// -----------------------------------------------------------------------------
+// Parâmetros principais
+// -----------------------------------------------------------------------------
+i_swing = input.int(10, title="Swing Length", tooltip="Barras para confirmar pivô")
+i_rr = input.float(2.0, title="Risk : Reward", tooltip="Múltiplo de risco para o TP")
+i_sl_buffer = input.float(0.10, title="SL Buffer (%)", tooltip="% extra além do pivô de origem")
+
+// -----------------------------------------------------------------------------
+// 1 — Detecção de pivôs
+// -----------------------------------------------------------------------------
+ph = ta.pivothigh(high, i_swing, i_swing)
+pl = ta.pivotlow(low, i_swing, i_swing)
+
+// Marcadores visuais plotados com offset
+plotshape(not na(ph) ? ph : na, style=shape.triangledown, location=location.abovebar, color=color.red, offset=-i_swing, title="Pivot High", size=size.small)
+plotshape(not na(pl) ? pl : na, style=shape.triangleup, location=location.belowbar, color=color.green, offset=-i_swing, title="Pivot Low", size=size.small)
+
+// Variáveis para guardar o último pivô e seu índice
+var float last_sh = na
+var int last_sh_index = na
+var float last_sl = na
+var int last_sl_index = na
+
+if not na(ph)
+    last_sh := ph
+    last_sh_index := bar_index - i_swing
+
+if not na(pl)
+    last_sl := pl
+    last_sl_index := bar_index - i_swing
+
+// -----------------------------------------------------------------------------
+// 2 — BOS (Break of Structure)
+// -----------------------------------------------------------------------------
+// Altista: o último SL formou-se antes do último SH, e o close cruza acima desse SH
+bull_bos = not na(last_sl) and not na(last_sh) and (last_sl_index < last_sh_index) and ta.crossover(close, last_sh)
+
+// Baixista: o último SH formou-se antes do último SL, e o close cruza abaixo desse SL
+bear_bos = not na(last_sl) and not na(last_sh) and (last_sh_index < last_sl_index) and ta.crossunder(close, last_sl)
+
+// -----------------------------------------------------------------------------
+// 3 — Cálculo dos níveis
+// -----------------------------------------------------------------------------
+var bool is_setup_active = false
+var int setup_type = 0 // 1 = Altista, -1 = Baixista
+var float setup_entry = na
+var float setup_sl = na
+var float setup_tp = na
+
+if bull_bos
+    setup_type := 1
+    origem = last_sl
+    bosBreak = close
+    setup_entry := origem + (bosBreak - origem) * 0.5
+    setup_sl := origem * (1 - (i_sl_buffer / 100))
+    setup_tp := setup_entry + (setup_entry - setup_sl) * i_rr
+    is_setup_active := true
+
+if bear_bos
+    setup_type := -1
+    origem = last_sh
+    bosBreak = close
+    setup_entry := origem + (bosBreak - origem) * 0.5
+    setup_sl := origem * (1 + (i_sl_buffer / 100))
+    setup_tp := setup_entry + (setup_entry - setup_sl) * i_rr
+    is_setup_active := true
+
+// -----------------------------------------------------------------------------
+// 4 e 5 — Entrada e Saída
+// -----------------------------------------------------------------------------
+// Aguarda a candle tocar o nível de 50%. Se antes cruzar o SL, cancela.
+if is_setup_active and strategy.position_size == 0
+    if setup_type == 1 // Setup Altista
+        if low <= setup_sl
+            // Preço cruzou SL antes, o setup é cancelado
+            is_setup_active := false
+        else if low <= setup_entry
+            // Toca 50%, entra a mercado na barra
+            strategy.entry("Long", strategy.long)
+            strategy.exit("Exit Long", "Long", stop=setup_sl, limit=setup_tp)
+            is_setup_active := false
+
+    else if setup_type == -1 // Setup Baixista
+        if high >= setup_sl
+            // Preço cruzou SL antes, o setup é cancelado
+            is_setup_active := false
+        else if high >= setup_entry
+            // Toca 50%, entra a mercado na barra
+            strategy.entry("Short", strategy.short)
+            strategy.exit("Exit Short", "Short", stop=setup_sl, limit=setup_tp)
+            is_setup_active := false
