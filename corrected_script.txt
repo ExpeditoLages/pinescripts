@@ -23,6 +23,12 @@ dn_hist_col_ = input.color(#f78c8c, title = '', group = 'Trend Visualization', i
 start = input.time(timestamp('1 Jan 2020 00:00 +0000'), title = 'Start Date', group = 'Time Settings', inline = 'startdate')
 timer = input.string('From start', title = 'Timer Option', options = ['Custom', 'From start'], group = 'Time Settings', inline = 'startdate')
 
+// ==================== SECOND TREND LINE INPUTS ====================
+ma2_type = input.string('EMA', 'Tipo da Média 2', options=['SMA', 'EMA', 'WMA', 'HMA'], group='Segunda Linha de Tendência')
+ma2_length = input.int(20, 'Período da Média 2', minval=1, group='Segunda Linha de Tendência')
+ma2_up_col = input.color(color.blue, 'Cor Alta Média 2', group='Segunda Linha de Tendência')
+ma2_dn_col = input.color(color.purple, 'Cor Baixa Média 2', group='Segunda Linha de Tendência')
+
 // ==================== ML INPUTS ====================
 learning_rate = input.float(0.01, 'Learning Rate', minval = 0.001, maxval = 1.0, step = 0.001, group = 'ML Settings')
 threshold_long = input.float(0.6, 'Long Threshold', minval = 0.5, maxval = 0.99, step = 0.01, group = 'ML Settings')
@@ -82,7 +88,7 @@ if na(x1) and StartTime() or na(x1) and timer == 'From start'
 lowest_speed = ta.lowest(speed, math.max(1, bar_index - x1))
 highest_speed = ta.highest(speed, math.max(1, bar_index - x1))
 
-if StartTime() or timer == 'From start'
+if (StartTime() or timer == 'From start') and barstate.isconfirmed
     if bullsrc > trend and bullsrc[1] <= trend
         bearish.change.unshift(lowest_speed)
         bearish.t.unshift(bar_index - x1)
@@ -101,11 +107,24 @@ speed := speed + c - o
 trendspeed = ta.hma(speed, 5)
 
 // ==================== PLOTS ORIGINAIS ====================
+// Linha de Tendência 1 (Dinâmica)
 colour    = ta.wma(close, 2) > dyn_ema ? up_col : dn_col
 rma_dyn_ema(x, p) => ta.rma(dyn_ema[x], p)
 fillColor = rma_dyn_ema(0, 5) > rma_dyn_ema(1, 5) ? color.new(up_col, 70) : color.new(dn_col, 70)
 p1 = plot(dyn_ema, color = colour, linewidth = 2, title = 'Dynamic Trend', force_overlay = true)
 p2 = plot(ta.rma(hl2, 50), display = display.none, editable = false, force_overlay = true)
+
+// Linha de Tendência 2
+get_ma(type, src, len) =>
+    switch type
+        'SMA' => ta.sma(src, len)
+        'EMA' => ta.ema(src, len)
+        'WMA' => ta.wma(src, len)
+        'HMA' => ta.hma(src, len)
+
+ma2_val = get_ma(ma2_type, close, ma2_length)
+ma2_color = close > ma2_val ? ma2_up_col : ma2_dn_col
+plot(ma2_val, color = ma2_color, linewidth = 2, title = 'Linha de Tendência 2', force_overlay = true)
 
 min_speed = ta.lowest(speed, collen)
 max_speed = ta.highest(speed, collen)
@@ -164,15 +183,24 @@ var float entry_price = na
 // Calculate ATR in the global scope to avoid warnings
 atr_14 = ta.atr(14) // Mantido para outras métricas/features
 
-is_bullish_trend = ta.wma(close, 2) > dyn_ema
-is_bearish_trend = ta.wma(close, 2) <= dyn_ema
+// Tendência 1
+is_bullish_trend1 = ta.wma(close, 2) > dyn_ema
+is_bearish_trend1 = ta.wma(close, 2) <= dyn_ema
+
+// Tendência 2
+is_bullish_trend2 = close > ma2_val
+is_bearish_trend2 = close <= ma2_val
+
+// Confluência de Tendências
+confluence_bullish = is_bullish_trend1 and is_bullish_trend2
+confluence_bearish = is_bearish_trend1 and is_bearish_trend2
 
 if (StartTime() or timer == 'From start') and barstate.isconfirmed
-    // Entradas e Saídas baseadas na mudança de tendência
-    if is_bullish_trend
+    // Entradas e Saídas baseadas na confluência das duas tendências
+    if confluence_bullish
         trade_direction := 1
         entry_price := trade_direction[1] != 1 ? close : entry_price
-    else if is_bearish_trend
+    else if confluence_bearish
         trade_direction := -1
         entry_price := trade_direction[1] != -1 ? close : entry_price
 
