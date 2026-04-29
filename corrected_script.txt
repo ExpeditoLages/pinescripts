@@ -1,7 +1,7 @@
 // This work is licensed under a Attribution-NonCommercial-ShareAlike 4.0 International (CC BY-NC-SA 4.0)
 // © Zeiierman (original) – ML adaptation fully corrected (no repaint, no bugs)
 //@version=6
-indicator('Trend Speed Analyzer + ML Signals (Corrected)', overlay = false, max_labels_count = 500)
+strategy('Trend Speed Analyzer + ML Signals (Estratégia)', overlay = false, calc_on_every_tick = false, calc_on_order_fills = false, initial_capital = 1000, default_qty_type = strategy.percent_of_equity, default_qty_value = 100)
 
 // ==================== ORIGINAL INPUTS ====================
 max_length       = input.int(50, minval = 1, title = 'Maximum Length', group = 'Dynamic Moving Average')
@@ -239,9 +239,11 @@ if (StartTime() or timer == 'From start') and barstate.isconfirmed
     if confluence_bullish
         trade_direction := 1
         entry_price := trade_direction[1] != 1 ? close : entry_price
+        strategy.entry("Long", strategy.long)
     else if confluence_bearish
         trade_direction := -1
         entry_price := trade_direction[1] != -1 ? close : entry_price
+        strategy.entry("Short", strategy.short)
 
 // Plotagem dos sinais (sem repintura)
 plotshape(trade_direction == 1 and trade_direction[1] != 1, title = 'Long Entry', location = location.belowbar, color = color.lime, style = shape.triangleup, size = size.small, force_overlay = true)
