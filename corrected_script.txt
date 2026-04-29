@@ -160,38 +160,29 @@ if (StartTime() or timer == 'From start') and all_features_valid and not na(prob
 // ==================== GERAÇÃO DE SINAIS ====================
 var int trade_direction = 0
 var float entry_price = na
-var float stop_price = na
 
 // Calculate ATR in the global scope to avoid warnings
-atr_14 = ta.atr(14)
+atr_14 = ta.atr(14) // Mantido para outras métricas/features
+
+is_bullish_trend = ta.wma(close, 2) > dyn_ema
+is_bearish_trend = ta.wma(close, 2) <= dyn_ema
 
 if (StartTime() or timer == 'From start') and barstate.isconfirmed
-    // Entradas: baseadas na probabilidade calculada AGORA (com features passadas)
-    if trade_direction == 0 and probability > threshold_long
+    // Entradas e Saídas baseadas na mudança de tendência
+    if is_bullish_trend
         trade_direction := 1
-        entry_price := close
-        stop_price := close - atr_14 * stop_atr_mult
-    else if trade_direction == 0 and probability < threshold_short
+        entry_price := trade_direction[1] != 1 ? close : entry_price
+    else if is_bearish_trend
         trade_direction := -1
-        entry_price := close
-        stop_price := close + atr_14 * stop_atr_mult
-
-    // Saídas
-    if trade_direction == 1
-        if low <= stop_price or (use_exits and probability < threshold_short)
-            trade_direction := 0
-    if trade_direction == -1
-        if high >= stop_price or (use_exits and probability > threshold_long)
-            trade_direction := 0
+        entry_price := trade_direction[1] != -1 ? close : entry_price
 
 // Plotagem dos sinais (sem repintura)
 plotshape(trade_direction == 1 and trade_direction[1] != 1, title = 'Long Entry', location = location.belowbar, color = color.lime, style = shape.triangleup, size = size.small, force_overlay = true)
 plotshape(trade_direction == -1 and trade_direction[1] != -1, title = 'Short Entry', location = location.abovebar, color = color.red, style = shape.triangledown, size = size.small, force_overlay = true)
-plotshape(trade_direction == 0 and trade_direction[1] == 1, title = 'Exit Long', location = location.abovebar, color = color.yellow, style = shape.xcross, size = size.tiny, force_overlay = true)
-plotshape(trade_direction == 0 and trade_direction[1] == -1, title = 'Exit Short', location = location.belowbar, color = color.yellow, style = shape.xcross, size = size.tiny, force_overlay = true)
 
-// Linha de stop
-plot(trade_direction != 0 ? stop_price : na, 'Stop Price', color = color.gray, style = plot.style_linebr, force_overlay = true)
+// Como é stop & reverse, as saídas ocorrem na virada da tendência (junto com a entrada inversa)
+plotshape(trade_direction == -1 and trade_direction[1] == 1, title = 'Exit Long', location = location.abovebar, color = color.yellow, style = shape.xcross, size = size.tiny, force_overlay = true)
+plotshape(trade_direction == 1 and trade_direction[1] == -1, title = 'Exit Short', location = location.belowbar, color = color.yellow, style = shape.xcross, size = size.tiny, force_overlay = true)
 
 // ==================== TABELA ORIGINAL ====================
 if barstate.islast and tbl_ and bullish.change.size() > 0 and bearish.change.size() > 0
