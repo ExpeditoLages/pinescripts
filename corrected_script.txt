@@ -23,11 +23,15 @@ dn_hist_col_ = input.color(#f78c8c, title = '', group = 'Trend Visualization', i
 start = input.time(timestamp('1 Jan 2020 00:00 +0000'), title = 'Start Date', group = 'Time Settings', inline = 'startdate')
 timer = input.string('From start', title = 'Timer Option', options = ['Custom', 'From start'], group = 'Time Settings', inline = 'startdate')
 
-// ==================== SECOND TREND LINE INPUTS ====================
-ma2_type = input.string('EMA', 'Tipo da Média 2', options=['SMA', 'EMA', 'WMA', 'HMA'], group='Segunda Linha de Tendência')
-ma2_length = input.int(20, 'Período da Média 2', minval=1, group='Segunda Linha de Tendência')
-ma2_up_col = input.color(color.blue, 'Cor Alta Média 2', group='Segunda Linha de Tendência')
-ma2_dn_col = input.color(color.purple, 'Cor Baixa Média 2', group='Segunda Linha de Tendência')
+// ==================== LUX ALGO OSCILLATOR MATRIX INPUTS ====================
+dW = input.bool(true, "Main Length", inline="1", group="HYPER WAVE")
+mL = input.int(7, "", inline="1", group="HYPER WAVE", minval=5, maxval=21)
+sT = input.string("SMA", "Signal", inline="s", group="HYPER WAVE", options=["SMA", "EMA"])
+sL = input.int(3, "", inline="s", group="HYPER WAVE", minval=2, maxval=10)
+
+Smf = input.bool(true, "Money Flow Length", inline="mfi", group="SMART MONEY FLOW")
+mfL = input.int(35, "", inline="mfi", group="SMART MONEY FLOW", minval=10, maxval=55)
+mfS = input.int(6, "Smooth", inline="mfx", group="SMART MONEY FLOW", minval=2, maxval=10)
 
 // ==================== ML INPUTS ====================
 learning_rate = input.float(0.01, 'Learning Rate', minval = 0.001, maxval = 1.0, step = 0.001, group = 'ML Settings')
@@ -114,18 +118,6 @@ fillColor = rma_dyn_ema(0, 5) > rma_dyn_ema(1, 5) ? color.new(up_col, 70) : colo
 p1 = plot(dyn_ema, color = colour, linewidth = 2, title = 'Dynamic Trend', force_overlay = true)
 p2 = plot(ta.rma(hl2, 50), display = display.none, editable = false, force_overlay = true)
 
-// Linha de Tendência 2
-get_ma(type, src, len) =>
-    switch type
-        'SMA' => ta.sma(src, len)
-        'EMA' => ta.ema(src, len)
-        'WMA' => ta.wma(src, len)
-        'HMA' => ta.hma(src, len)
-
-ma2_val = get_ma(ma2_type, close, ma2_length)
-ma2_color = close > ma2_val ? ma2_up_col : ma2_dn_col
-plot(ma2_val, color = ma2_color, linewidth = 2, title = 'Linha de Tendência 2', force_overlay = true)
-
 min_speed = ta.lowest(speed, collen)
 max_speed = ta.highest(speed, collen)
 normalized_speed = (speed - min_speed) / math.max(max_speed - min_speed, 0.0001)
@@ -176,6 +168,52 @@ if (StartTime() or timer == 'From start') and all_features_valid and not na(prob
         wi := wi - learning_rate * error * xi
         array.set(weights, i, wi)
 
+// ==================== LUX ALGO OSCILLATOR MATRIX LOGIC ====================
+lux_st(simple string src, float osc, simple int len) =>
+    float o = switch src
+        "SMA" => ta.sma(osc, len)
+        "EMA" => ta.ema(osc, len)
+
+calc_osc(simple int len, simple int smt) =>
+    float hi = ta.highest(len)
+    float lo = ta.lowest(len)
+    float av = ta.sma(hl2, len)
+    sig = ta.ema(ta.linreg((close - math.avg(hi, lo, av)) / math.max(hi - lo, 0.0001) * 100, len, 0), smt)
+    [sig]
+
+calc_mfi() =>
+    mfi_val = ta.sma(ta.mfi(hl2, mfL) - 50, mfS)
+    [mfi_val]
+
+[osc_sig] = calc_osc(mL, sL)
+[mf_mfi] = calc_mfi()
+
+// Histórico do MFI do Lux Algo para evitar repintura e cálculo de bandas (cf_blT / cf_brT)
+var cf_blT = array.new<float>(1, na)
+var cf_brT = array.new<float>(1, na)
+var float _mfi_hist = na
+
+if barstate.isconfirmed
+    _mfi_hist := mf_mfi[mfL]
+    if mf_mfi > 0
+        if cf_brT.size() > 1
+            cf_brT.pop()
+        if cf_blT.size() > mfL
+            cf_blT.pop()
+        if mf_mfi > cf_blT.avg()
+            cf_blT.unshift(mf_mfi)
+        else
+            cf_blT.unshift(_mfi_hist > 0 ? _mfi_hist : mf_mfi)
+    else if mf_mfi < 0
+        if cf_blT.size() > 1
+            cf_blT.pop()
+        if cf_brT.size() > mfL
+            cf_brT.pop()
+        if mf_mfi < cf_blT.avg()
+            cf_brT.unshift(mf_mfi)
+        else
+            cf_brT.unshift(_mfi_hist < 0 ? _mfi_hist : mf_mfi)
+
 // ==================== GERAÇÃO DE SINAIS ====================
 var int trade_direction = 0
 var float entry_price = na
@@ -183,20 +221,20 @@ var float entry_price = na
 // Calculate ATR in the global scope to avoid warnings
 atr_14 = ta.atr(14) // Mantido para outras métricas/features
 
-// Tendência 1
+// Tendência 1 (Dinâmica)
 is_bullish_trend1 = ta.wma(close, 2) > dyn_ema
 is_bearish_trend1 = ta.wma(close, 2) <= dyn_ema
 
-// Tendência 2
-is_bullish_trend2 = close > ma2_val
-is_bearish_trend2 = close <= ma2_val
+// Confluência Lux Algo Matrix
+lux_bullish = osc_sig > 0 and mf_mfi > 0
+lux_bearish = osc_sig < 0 and mf_mfi < 0
 
-// Confluência de Tendências
-confluence_bullish = is_bullish_trend1 and is_bullish_trend2
-confluence_bearish = is_bearish_trend1 and is_bearish_trend2
+// Confluência Final (Tendência Dinâmica + Lux Algo)
+confluence_bullish = is_bullish_trend1 and lux_bullish
+confluence_bearish = is_bearish_trend1 and lux_bearish
 
 if (StartTime() or timer == 'From start') and barstate.isconfirmed
-    // Entradas e Saídas baseadas na confluência das duas tendências
+    // Entradas e Saídas baseadas na confluência de tendência e matrix
     if confluence_bullish
         trade_direction := 1
         entry_price := trade_direction[1] != 1 ? close : entry_price
