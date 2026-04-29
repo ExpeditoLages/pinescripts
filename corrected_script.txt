@@ -254,7 +254,7 @@ plotshape(trade_direction == -1 and trade_direction[1] == 1, title = 'Exit Long'
 plotshape(trade_direction == 1 and trade_direction[1] == -1, title = 'Exit Short', location = location.belowbar, color = color.yellow, style = shape.xcross, size = size.tiny, force_overlay = true)
 
 // ==================== TABELA ORIGINAL ====================
-if barstate.islast and tbl_ and bullish.change.size() > 0 and bearish.change.size() > 0
+if barstate.islastconfirmedhistory and tbl_ and bullish.change.size() > 0 and bearish.change.size() > 0
     bullish_recent = bullish.change.slice(0, math.min(lookback_period, bullish.change.size()))
     bearish_recent = bearish.change.slice(0, math.min(lookback_period, bearish.change.size()))
 
