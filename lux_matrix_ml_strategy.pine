@@ -341,7 +341,7 @@ plot(mf.mfi > 0 and Smf ? cf.blT.safe_avg() : na, color = mfBL, style = plot.sty
 plot(mf.mfi < 0 and Smf ? cf.brT.safe_avg() : na, color = mfBR, style = plot.style_linebr)
 
 // CONFLUENCE METER
-if barstate.islast
+if barstate.islastconfirmedhistory
     line.new(x1 = last_bar_index, x2 = bar_index - 1, y1 = 20, y2 = 20, color = chart.fg_color.transp(50), style = line.style_dashed, extend = extend.right)
     line.new(x1 = last_bar_index, x2 = bar_index - 1, y1 = -20, y2 = -20, color = chart.fg_color.transp(50), style = line.style_dashed, extend = extend.right)
 
