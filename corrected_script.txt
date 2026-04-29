@@ -78,16 +78,20 @@ if na(x1) and StartTime() or na(x1) and timer == 'From start'
     x1 := bar_index
     y1 := o
 
+// Call highest/lowest outside the if-scope to avoid history warnings
+lowest_speed = ta.lowest(speed, math.max(1, bar_index - x1))
+highest_speed = ta.highest(speed, math.max(1, bar_index - x1))
+
 if StartTime() or timer == 'From start'
     if bullsrc > trend and bullsrc[1] <= trend
-        bearish.change.unshift(ta.lowest(speed, math.max(1, bar_index - x1)))
+        bearish.change.unshift(lowest_speed)
         bearish.t.unshift(bar_index - x1)
         x1 := bar_index
         y1 := bullsrc
         pos := 1
         speed := c - o
     if bearsrc < trend and bearsrc[1] >= trend
-        bullish.change.unshift(ta.highest(speed, math.max(1, bar_index - x1)))
+        bullish.change.unshift(highest_speed)
         bullish.t.unshift(bar_index - x1)
         x1 := bar_index
         y1 := bearsrc
@@ -158,16 +162,19 @@ var int trade_direction = 0
 var float entry_price = na
 var float stop_price = na
 
+// Calculate ATR in the global scope to avoid warnings
+atr_14 = ta.atr(14)
+
 if (StartTime() or timer == 'From start') and barstate.isconfirmed
     // Entradas: baseadas na probabilidade calculada AGORA (com features passadas)
     if trade_direction == 0 and probability > threshold_long
         trade_direction := 1
         entry_price := close
-        stop_price := close - ta.atr(14) * stop_atr_mult
+        stop_price := close - atr_14 * stop_atr_mult
     else if trade_direction == 0 and probability < threshold_short
         trade_direction := -1
         entry_price := close
-        stop_price := close + ta.atr(14) * stop_atr_mult
+        stop_price := close + atr_14 * stop_atr_mult
 
     // Saídas
     if trade_direction == 1
