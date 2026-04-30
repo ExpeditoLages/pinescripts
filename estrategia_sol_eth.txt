@@ -1,0 +1,132 @@
+// This source code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © Estratégia Quant Institucional
+
+//@version=5
+strategy("Estratégia SOL/ETH - Alta Precisão", overlay=true, initial_capital=1000, default_qty_type=strategy.percent_of_equity, default_qty_value=10, commission_type=strategy.commission.percent, commission_value=0.04, calc_on_every_tick=false, calc_on_order_fills=false)
+
+// ==============================================================================
+// AVISO SOBRE EXPECTATIVAS
+// Nota: Um Win Rate de 90% com Risco:Retorno de 1:3 é uma anomalia estatística
+// em mercados eficientes reais. No entanto, este algoritmo foi desenvolvido
+// com as melhores práticas institucionais (Filtro de Tendência Maior +
+// Exaustão de Momentum + Gatilho Direcional) para buscar a maior taxa de
+// acerto possível, especialmente em criptos com forte tendência como SOL e ETH.
+// Recomenda-se utilizar gráficos de 15m ou 1H para atingir a meta de 1 a 2 trades diários.
+// ==============================================================================
+
+// ==============================================================================
+// PARÂMETROS DA ESTRATÉGIA
+// ==============================================================================
+grp_risk = "Gerenciamento de Risco Profissional"
+risco_por_trade = input.float(1.0, title="Risco por Trade (%)", group=grp_risk, minval=0.1, maxval=5.0, step=0.1, tooltip="Porcentagem do capital arriscada por operação.")
+rr_ratio        = input.float(3.0, title="Relação Risco/Retorno", group=grp_risk, tooltip="1:3 significa que o alvo (Take Profit) é 3 vezes o tamanho do Stop Loss.")
+atr_periodo     = input.int(14, title="Período do ATR", group=grp_risk)
+atr_multi       = input.float(1.5, title="Multiplicador do ATR (Stop)", group=grp_risk, tooltip="Distância do Stop Loss baseada na volatilidade.")
+
+grp_trend = "Filtros Institucionais de Tendência"
+ema_rapida_len = input.int(50, title="EMA Rápida", group=grp_trend)
+ema_lenta_len  = input.int(200, title="EMA Lenta", group=grp_trend)
+
+grp_mom = "Momentum e Gatilhos (Entradas)"
+rsi_len = input.int(14, title="Período RSI", group=grp_mom)
+rsi_os  = input.int(30, title="RSI Sobrevendido", group=grp_mom)
+rsi_ob  = input.int(70, title="RSI Sobrecomprado", group=grp_mom)
+
+// ==============================================================================
+// CÁLCULOS GLOBAIS (Prevenção contra Repainting e Avisos do Compilador)
+// ==============================================================================
+// ATR com proteção contra zero (nz)
+atr_val = ta.atr(atr_periodo)
+atr_safe = nz(atr_val, 0.0001)
+
+// Médias Móveis (Filtros de Tendência)
+ema_rapida = ta.ema(close, ema_rapida_len)
+ema_lenta  = ta.ema(close, ema_lenta_len)
+
+// RSI
+rsi_val = ta.rsi(close, rsi_len)
+// Funções históricas avaliadas no escopo global para evitar inconsistências
+rsi_min_recente = ta.lowest(rsi_val, 5)
+rsi_max_recente = ta.highest(rsi_val, 5)
+
+// MACD para confirmação de momentum e gatilho de entrada
+[macd_line, signal_line, _] = ta.macd(close, 12, 26, 9)
+
+// ==============================================================================
+// LÓGICA DE ENTRADA E FILTROS
+// ==============================================================================
+// Garantir que a barra esteja confirmada (evita repainting)
+barra_confirmada = barstate.isconfirmed
+
+// Identificação da Tendência Maior
+tendencia_alta  = close > ema_lenta and ema_rapida > ema_lenta
+tendencia_baixa = close < ema_lenta and ema_rapida < ema_lenta
+
+// Condições de Gatilho
+// Compra: Apenas a favor da tendência de alta, quando o RSI demonstrou exaustão de venda recentemente e o MACD vira para alta.
+cruzamento_alta_macd = ta.crossover(macd_line, signal_line)
+rsi_baixo_recente = rsi_min_recente < rsi_os
+
+condicao_compra = tendencia_alta and rsi_baixo_recente and cruzamento_alta_macd and barra_confirmada
+
+// Venda: Apenas a favor da tendência de baixa, quando o RSI demonstrou exaustão de compra recentemente e o MACD vira para baixa.
+cruzamento_baixa_macd = ta.crossunder(macd_line, signal_line)
+rsi_alto_recente = rsi_max_recente > rsi_ob
+
+condicao_venda = tendencia_baixa and rsi_alto_recente and cruzamento_baixa_macd and barra_confirmada
+
+// ==============================================================================
+// GERENCIAMENTO DE RISCO E DIMENSIONAMENTO DE POSIÇÃO
+// ==============================================================================
+// Cálculo do capital em risco
+capital_total = strategy.equity
+risco_financeiro = capital_total * (risco_por_trade / 100)
+
+// Distância do Stop Loss baseada em volatilidade (ATR)
+distancia_sl = atr_safe * atr_multi
+
+// Tamanho da posição (proteção contra divisão por zero)
+tamanho_posicao = distancia_sl > 0 ? (risco_financeiro / distancia_sl) : 0.0
+tamanho_posicao_seguro = math.max(0, tamanho_posicao)
+
+// ==============================================================================
+// EXECUÇÃO DE ORDENS E DEFINIÇÃO DE ALVOS
+// ==============================================================================
+var float preco_entrada = na
+var float stop_loss = na
+var float take_profit = na
+
+if (condicao_compra and strategy.position_size == 0)
+    preco_entrada := close
+    stop_loss := preco_entrada - distancia_sl
+    take_profit := preco_entrada + (distancia_sl * rr_ratio)
+    strategy.entry("Long", strategy.long, qty=tamanho_posicao_seguro)
+    strategy.exit("Saída Long", "Long", stop=stop_loss, limit=take_profit)
+
+if (condicao_venda and strategy.position_size == 0)
+    preco_entrada := close
+    stop_loss := preco_entrada + distancia_sl
+    take_profit := preco_entrada - (distancia_sl * rr_ratio)
+    strategy.entry("Short", strategy.short, qty=tamanho_posicao_seguro)
+    strategy.exit("Saída Short", "Short", stop=stop_loss, limit=take_profit)
+
+// ==============================================================================
+// PLOTS E INTERFACE DO USUÁRIO (UI)
+// ==============================================================================
+plot(ema_lenta, color=color.blue, linewidth=2, title="EMA Lenta (Tendência Maior)")
+plot(ema_rapida, color=color.orange, linewidth=1, title="EMA Rápida (Tendência Menor)")
+
+// Exibir painel de informações atualizado apenas em barras confirmadas para evitar repainting e avisos
+var table painel_info = table.new(position.top_right, 2, 4, border_width=1, border_color=color.gray)
+if barstate.islastconfirmedhistory
+    table.cell(painel_info, 0, 0, "Ativo Operado", bgcolor=color.new(color.black, 20), text_color=color.white)
+    table.cell(painel_info, 1, 0, syminfo.ticker, bgcolor=color.new(color.black, 20), text_color=color.white)
+
+    table.cell(painel_info, 0, 1, "Tendência Atual", bgcolor=color.new(color.black, 20), text_color=color.white)
+    table.cell(painel_info, 1, 1, tendencia_alta ? "Alta" : tendencia_baixa ? "Baixa" : "Neutra", bgcolor=tendencia_alta ? color.new(color.green, 40) : tendencia_baixa ? color.new(color.red, 40) : color.new(color.gray, 40), text_color=color.white)
+
+    table.cell(painel_info, 0, 2, "ATR Seguro", bgcolor=color.new(color.black, 20), text_color=color.white)
+    table.cell(painel_info, 1, 2, str.tostring(atr_safe, "#.####"), bgcolor=color.new(color.black, 20), text_color=color.white)
+
+    table.cell(painel_info, 0, 3, "Risco / Retorno", bgcolor=color.new(color.black, 20), text_color=color.white)
+    table.cell(painel_info, 1, 3, "1 : " + str.tostring(rr_ratio), bgcolor=color.new(color.black, 20), text_color=color.white)
