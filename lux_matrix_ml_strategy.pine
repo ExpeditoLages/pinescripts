@@ -1,0 +1,410 @@
+//@version=5
+strategy("Matriz Osciladora ML - Estratégia [6.0]", shorttitle = "Matriz Osc ML", overlay = false, max_lines_count = 500, calc_on_every_tick=false, calc_on_order_fills=false, initial_capital=1000, default_qty_type=strategy.percent_of_equity, default_qty_value=100)
+
+// [TOOLTIPS]
+dwTL = "Comprimento da hiper onda"
+smTL = "[SMA] Suavizar sinal com média móvel simples\n[EMA] Suavizar com média móvel exponencial\n[Input] Comprimento da suavização"
+dvTL = "Sensibilidade da divergência em tempo real : menos sensibilidade = mais divergências curtas; mais sensibilidade = mais divergências longas"
+cmTL = "Mostrar medidor de confluência ao lado do oscilador"
+caTL = "Mostrar área de confluência na parte superior/inferior"
+rfTL = "Fator maior retornará menos sinais, mas mais fortes; fator menor retornará mais sinais, porém mais fracos"
+
+// [HIPER ONDA]
+simple bool   dW   = input.bool  (true,                      "Comprimento Principal        ", inline = "1 ",   group = "HIPER ONDA",  tooltip = dwTL)
+simple int    mL   = input.int   (7,                         "                             ", inline = "1 ",   group = "HIPER ONDA",  minval = 5, maxval = 21)
+simple string sT   = input.string("SMA",                     "Sinal                        ", inline = "s ",   group = "HIPER ONDA",  options = ["SMA", "EMA"], tooltip = smTL)
+simple int    sL   = input.int   (3,                         "                             ", inline = "s ",   group = "HIPER ONDA",  minval = 2, maxval = 10)
+simple color  fCSS = input.color (#51B155,                   "Cores                        ", inline = "css ", group = "HIPER ONDA")
+simple color  sCSS = input.color (#80828D,                   "                             ", inline = "css ", group = "HIPER ONDA")
+simple int    tCSS = input.int   (80,                        "                             ", inline = "css ", group = "HIPER ONDA",  minval = 0, maxval = 100)
+simple int    dvT  = input.int   (20,                        "Sensibilidade Divergência    ", inline = "x ",   group = "HIPER ONDA",  minval = 20, maxval = 40, tooltip = dvTL)
+simple bool   sDiv = input.bool  (true,                      "Mostrar Divergências         ", inline = "div ", group = "HIPER ONDA")
+simple color  blDv = input.color (color.new(#2962ff, 20),    "                             ", inline = "div ", group = "HIPER ONDA")
+simple color  brDv = input.color (color.new(#f23645, 20),    "                             ", inline = "div ", group = "HIPER ONDA")
+
+// [FLUXO DE DINHEIRO INTELIGENTE]
+simple bool   Smf  = input.bool  (true,                      "Comprimento Fluxo de Dinheiro", inline = "mfi ",  group = "FLUXO DE DINHEIRO INTELIGENTE")
+simple int    mfL  = input.int   (35,                        "                             ", inline = "mfi ",  group = "FLUXO DE DINHEIRO INTELIGENTE", minval = 10, maxval = 55)
+simple int    mfS  = input.int   (6,                         "Suavização                   ", inline = "mfx ",  group = "FLUXO DE DINHEIRO INTELIGENTE", minval = 2, maxval = 10)
+simple color  mfBL = input.color (#089981,                   "Cores do Fluxo               ", inline = "mfiC",  group = "FLUXO DE DINHEIRO INTELIGENTE")
+simple color  mfBR = input.color (#f23645,                   "                             ", inline = "mfiC",  group = "FLUXO DE DINHEIRO INTELIGENTE")
+
+// [CONFLUÊNCIA]
+simple color  cnBL = input.color (#089981,                   "Cores da Confluência         ", inline = "cf ",   group = "CONFLUÊNCIA")
+simple color  cnBR = input.color (#f23645,                   "                             ", inline = "cf ",   group = "CONFLUÊNCIA")
+simple bool   sCNF = input.bool  (true,                      "Mostrar Medidor              ", inline = "zf ",   group = "CONFLUÊNCIA", tooltip = cmTL)
+simple bool   sCNB = input.bool  (true,                      "Mostrar Áreas                ", inline = "zx ",   group = "CONFLUÊNCIA", tooltip = caTL)
+
+// [REVERSÃO]
+simple bool   rsS  = input.bool  (true,                      "Fator de Reversão            ", inline = "rv ",   group = "REVERSÃO")
+simple int    rsF  = input.int   (4,                         "                             ", inline = "rv ",   group = "REVERSÃO", options = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10], tooltip = rfTL)
+simple color  rsBL = input.color (#089981,                   "Cores da Reversão            ", inline = "rc ",   group = "REVERSÃO")
+simple color  rsBR = input.color (#f23645,                   "                             ", inline = "rc ",   group = "REVERSÃO")
+
+// [MACHINE LEARNING - KNN]
+simple int    knn_k = input.int  (5,                         "K Vizinhos (KNN)             ", group = "MACHINE LEARNING", minval=1, maxval=15)
+simple int    knn_w = input.int  (200,                       "Janela de Treino (Barras)    ", group = "MACHINE LEARNING", minval=50, maxval=500)
+simple int    knn_f = input.int  (5,                         "Barras Futuras (Target)      ", group = "MACHINE LEARNING", minval=1, maxval=20)
+
+// [GESTÃO DE RISCO - ATR]
+simple float  atr_sl_mult = input.float(1.5, "Stop Loss (Multiplicador ATR)  ", group="GESTÃO DE RISCO", step=0.1)
+simple float  atr_tp_mult = input.float(2.0, "Take Profit (Multiplicador ATR)", group="GESTÃO DE RISCO", step=0.1)
+
+type oL
+    float sig
+    float sgD
+    color cO
+
+type dP
+    int   n
+    float src
+    float p
+
+type smf
+    float mfi
+    color mfc
+    float blMFI
+    float brMFI
+
+type cnf
+    color   up
+    color   dn
+    float[] blT
+    float[] brT
+
+var oL  osc = oL.new (na, na, na)
+var dP  div = dP.new (na, na, na)
+var smf mf  = smf.new(na, na, na, na)
+var cnf cf  = cnf.new(
+     color.rgb(54, 58, 69, 60)
+   , color.rgb(54, 58, 69, 60)
+   , array.new<float>(1, na)
+   , array.new<float>(1, na)
+ )
+
+// [FIX] Variáveis de escopo global para históricos e ta.cross*
+var float _mfi_hist  = na
+var float _sig_prev  = na
+var float _sgD_prev  = na
+var bool  _crossOver  = false
+var bool  _crossUnder = false
+
+method safe_avg(float[] arr) =>
+    float a = array.avg(arr)
+    na(a) ? 0.0 : a
+
+mfT() =>
+    switch
+        mf.mfi > 0 =>
+            if cf.brT.size() > 1
+                cf.brT.pop()
+            if cf.blT.size() > mfL
+                cf.blT.pop()
+            if mf.mfi > cf.blT.safe_avg()
+                cf.blT.unshift(mf.mfi)
+            else
+                cf.blT.unshift(_mfi_hist > 0 ? _mfi_hist : mf.mfi)
+        mf.mfi < 0 =>
+            if cf.blT.size() > 1
+                cf.blT.pop()
+            if cf.brT.size() > mfL
+                cf.brT.pop()
+            if mf.mfi < cf.blT.safe_avg()
+                cf.brT.unshift(mf.mfi)
+            else
+                cf.brT.unshift(_mfi_hist < 0 ? _mfi_hist : mf.mfi)
+
+method st(simple string src, float osc_val, simple int len) =>
+    float o = switch src
+        "SMA" => ta.sma(osc_val, len)
+        "EMA" => ta.ema(osc_val, len)
+
+method css(color x, int inv) =>
+    color out = inv == 1 ? color.new(x, tCSS) : color.new(x, 0)
+
+method transp(color x, int t) =>
+    color.new(x, t)
+
+rv() =>
+    vMA  = ta.sma(volume, 7)
+    safe_vMA = nz(vMA) > 0 ? vMA : 1.0
+    rsi  = ta.rsi(safe_vMA, 7) - 50
+    tMj  = volume > safe_vMA * (rsF != 10 ? 1.0 + (rsF / 10.0) : 2.0) ? true : false
+    tMn  = volume > safe_vMA * (rsF != 10 ? 0.0 + (rsF / 10.0) : 2.0) and not tMj ? true : false
+    mjBR = tMj and osc.sig > rsF and mf.mfi > cf.blT.safe_avg() ? true : false
+    mjBL = tMj and osc.sig < -rsF and mf.mfi < cf.brT.safe_avg() ? true : false
+    mnBR = tMn and osc.sig > 20 and osc.sig > osc.sgD and rsi > 20 ? true : false
+    mnBL = tMn and osc.sig < -20 and osc.sig < osc.sgD and rsi < -20 ? true : false
+    [mjBL, mjBR, mnBR, mnBL]
+
+osc(simple int len, simple int smt) =>
+    float hi = ta.highest(len)
+    float lo = ta.lowest(len)
+    float av = ta.sma(hl2, len)
+    float diff = math.max(hi - lo, 0.000001)
+    osc.sig := ta.ema(ta.linreg((close - math.avg(hi, lo, av)) / diff * 100, len, 0), sL)
+    osc.sgD := sT.st(osc.sig, 2)
+    osc.cO  := osc.sig > osc.sgD ? fCSS.css(1) : sCSS.css(1)
+
+mfi() =>
+    mf.mfi   := ta.sma(ta.mfi(hl2, mfL) - 50, mfS)
+    mf.mfc   := mf.mfi > 0 ? mfBL : mfBR
+    bL        = mf.mfi - 10
+    bR        = mf.mfi + 10
+    mf.blMFI := mf.mfi > 0 and mf.mfi > cf.blT.safe_avg() ? bL : 0
+    mf.brMFI := mf.mfi < 0 and mf.mfi < cf.brT.safe_avg() ? bR : 0
+
+cDiv() =>
+    mx   = math.max(nz(osc.sig), nz(osc.sgD), nz(_sig_prev), nz(_sgD_prev))
+    mn   = math.min(nz(osc.sig), nz(osc.sgD), nz(_sig_prev), nz(_sgD_prev))
+    mxid = mx == _sig_prev or mx == _sgD_prev ? 1 : 0
+    mnid = mn == _sig_prev or mn == _sgD_prev ? 1 : 0
+    switch
+        osc.sig > dvT =>
+            if _crossUnder
+                switch
+                    na(div.src) =>
+                        div.n   := bar_index - mxid
+                        div.src := math.max(nz(open[mxid]), nz(close[mxid]))
+                        div.p   := mx
+                    not na(div.src) =>
+                        if math.max(nz(open[mxid]), nz(close[mxid])) > div.src and not((mxid == 1 ? _sig_prev : osc.sig) > div.p)
+                            line.new(x1 = div.n, x2 = bar_index - mxid, y1 = div.p, y2 = mx, color = brDv)
+                            div.n   := na
+                            div.src := na
+                            div.p   := na
+                        else
+                            div.n   := bar_index - mxid
+                            div.src := math.max(nz(open[mxid]), nz(close[mxid]))
+                            div.p   := mx
+        osc.sig < -dvT =>
+            if _crossOver
+                switch
+                    na(div.src) =>
+                        div.n   := bar_index - mnid
+                        div.src := math.min(nz(open[mnid]), nz(close[mnid]))
+                        div.p   := mn
+                    not na(div.src) =>
+                        if math.min(nz(open[mnid]), nz(close[mnid])) < div.src and not((mnid == 1 ? _sig_prev : osc.sig) < div.p)
+                            line.new(x1 = div.n, x2 = bar_index - mnid, y1 = div.p, y2 = mn, color = blDv)
+                            div.n   := na
+                            div.src := na
+                            div.p   := na
+                        else
+                            div.n   := bar_index - mnid
+                            div.src := math.min(nz(open[mnid]), nz(close[mnid]))
+                            div.p   := mn
+
+// [LÓGICA MACHINE LEARNING - KNN]
+var array<float> f1_hist = array.new<float>()
+var array<float> f2_hist = array.new<float>()
+var array<int>   lbl_hist = array.new<int>()
+
+if bar_index >= knn_f and barstate.isconfirmed
+    float f1_val = nz(osc.sig[knn_f])
+    float f2_val = nz(mf.mfi[knn_f])
+    int target = close > close[knn_f] ? 1 : -1
+
+    array.push(f1_hist, f1_val)
+    array.push(f2_hist, f2_val)
+    array.push(lbl_hist, target)
+
+    if array.size(f1_hist) > knn_w
+        array.shift(f1_hist)
+        array.shift(f2_hist)
+        array.shift(lbl_hist)
+
+get_knn_pred(float curr_f1, float curr_f2) =>
+    int pred = 0
+    int sz = array.size(f1_hist)
+    if sz >= knn_k
+        array<float> dists = array.new<float>()
+        array<int> labels = array.new<int>()
+
+        for i = 0 to sz - 1
+            float d1 = array.get(f1_hist, i) - curr_f1
+            float d2 = array.get(f2_hist, i) - curr_f2
+            float dist = math.sqrt(d1*d1 + d2*d2)
+
+            array.push(dists, dist)
+            array.push(labels, array.get(lbl_hist, i))
+
+        int bull_cnt = 0
+        int bear_cnt = 0
+        for j = 1 to knn_k
+            float min_d = 999999.0
+            int min_idx = -1
+            for i = 0 to array.size(dists) - 1
+                if array.get(dists, i) < min_d
+                    min_d := array.get(dists, i)
+                    min_idx := i
+
+            if min_idx != -1
+                if array.get(labels, min_idx) == 1
+                    bull_cnt += 1
+                else
+                    bear_cnt += 1
+                array.set(dists, min_idx, 999999.0)
+
+        pred := bull_cnt > bear_cnt ? 1 : -1
+    pred
+
+// ============================[EXECUTION]============================ //
+
+osc(mL, sL)
+mfi()
+
+_mfi_hist  := nz(mf.mfi[mfL])
+_sig_prev  := nz(osc.sig[1])
+_sgD_prev  := nz(osc.sgD[1])
+_crossOver  := ta.crossover(osc.sig, osc.sgD)
+_crossUnder := ta.crossunder(osc.sig, osc.sgD)
+
+mfT()
+
+if sDiv
+    cDiv()
+
+[mjBL, mjBR, mnBR, mnBL] = rv()
+
+// ESTRATÉGIA LÓGICA E ENTRADAS
+bool is_bull_signal = (mjBL or mnBL) and rsS
+bool is_bear_signal = (mjBR or mnBR) and rsS
+
+int ml_pred = 0
+if is_bull_signal or is_bear_signal
+    ml_pred := get_knn_pred(osc.sig, mf.mfi)
+
+bool final_long  = is_bull_signal and ml_pred == 1
+bool final_short = is_bear_signal and ml_pred == -1
+
+if barstate.isconfirmed
+    if final_long
+        strategy.entry("Long", strategy.long)
+    if final_short
+        strategy.entry("Short", strategy.short)
+
+// GESTÃO DE RISCO - ATR Exits
+float atr_val = ta.atr(14)
+float long_tp = strategy.position_avg_price + (atr_val * atr_tp_mult)
+float long_sl = strategy.position_avg_price - (atr_val * atr_sl_mult)
+float short_tp = strategy.position_avg_price - (atr_val * atr_tp_mult)
+float short_sl = strategy.position_avg_price + (atr_val * atr_sl_mult)
+
+if strategy.position_size > 0
+    strategy.exit("Exit Long", "Long", limit=long_tp, stop=long_sl)
+if strategy.position_size < 0
+    strategy.exit("Exit Short", "Short", limit=short_tp, stop=short_sl)
+
+// PLOTS E VISUALS
+plotshape(final_long ? -65 : na, location = location.absolute, color = rsBL, size = size.tiny, style = shape.triangleup)
+plotshape(final_short ?  65 : na, location = location.absolute, color = rsBR, size = size.tiny, style = shape.triangledown)
+
+// HYPER WAVE
+plot(_crossOver and dW ? math.min(osc.sig, osc.sgD) : na, style = plot.style_circles, linewidth = 2, color = osc.cO.css(0), offset = 0)
+plot(_crossUnder and dW ? math.max(osc.sig, osc.sgD) : na, style = plot.style_circles, linewidth = 2, color = osc.cO.css(0), offset = 0)
+
+pO = plot(dW ? osc.sig : na, color = osc.cO.css(0))
+iO = plot(dW ? osc.sgD : na, color = osc.cO.css(1), display = display.none)
+bL_plot = plot(0, color = color.black)
+
+fill(pO, iO, color = dW ? osc.cO : na)
+
+// SMART MONEY FLOW
+pmf = plot(Smf ? mf.mfi : na, color = mf.mfc)
+blT_plot = plot(mf.blMFI > 0 and mf.mfi > 0 ? mf.blMFI : 0, color = na, display = display.none)
+brT_plot = plot(mf.brMFI < 0 and mf.mfi < 0 ? mf.brMFI : 0, color = na, display = display.none)
+
+fill(bL_plot, pmf, mf.mfc.transp(Smf ? 50 : 100))
+fill(bL_plot, blT_plot, mf.mfc.transp(Smf ? 0 : 100))
+fill(bL_plot, brT_plot, mf.mfc.transp(Smf ? 0 : 100))
+
+cf.up := color.rgb(54, 58, 69, 60)
+cf.dn := color.rgb(54, 58, 69, 60)
+
+switch
+    osc.sig > 0 and mf.mfi > 0 => cf.up := cnBL
+    osc.sig < 0 and mf.mfi < 0 => cf.dn := cnBR
+    =>
+        cf.dn := cnBR.transp(60)
+        cf.up := cnBL.transp(60)
+
+tLv = plot( 55, color = sCNB ? cf.up : na)
+bLv = plot(-55, color = sCNB ? cf.dn : na)
+tfL = plot( 50, display = display.none)
+dfL = plot(-50, display = display.none)
+
+fill(tLv, tfL, color = sCNB ? cf.up : na)
+fill(bLv, dfL, color = sCNB ? cf.dn : na)
+
+plot(mf.mfi > 0 and Smf ? cf.blT.safe_avg() : na, color = mfBL, style = plot.style_linebr)
+plot(mf.mfi < 0 and Smf ? cf.brT.safe_avg() : na, color = mfBR, style = plot.style_linebr)
+
+// CONFLUENCE METER
+if barstate.islastconfirmedhistory
+    line.new(x1 = last_bar_index, x2 = bar_index - 1, y1 = 20, y2 = 20, color = chart.fg_color.transp(50), style = line.style_dashed, extend = extend.right)
+    line.new(x1 = last_bar_index, x2 = bar_index - 1, y1 = -20, y2 = -20, color = chart.fg_color.transp(50), style = line.style_dashed, extend = extend.right)
+
+if sCNF
+    var line[] ln = array.new<line>()
+    for j in ln
+        j.delete()
+    ln.clear()
+
+    var label lb = na
+    lb.delete()
+    lb := na
+
+    for i = 0 to 21
+        int id = switch i
+            0  =>  55
+            1  =>  50
+            2  =>  45
+            3  =>  40
+            4  =>  35
+            5  =>  30
+            6  =>  25
+            7  =>  20
+            8  =>  15
+            9  =>  10
+            10 =>   5
+            11 =>   0
+            12 =>  -5
+            13 => -10
+            14 => -15
+            15 => -20
+            16 => -25
+            17 => -30
+            18 => -35
+            19 => -40
+            20 => -45
+            21 => -50
+
+        ln.unshift(
+             line.new(
+                 x1    = bar_index + 2
+               , x2    = bar_index + 2
+               , y1    = id
+               , y2    = id - 5
+               , color = color.from_gradient(id, -50, 55, cnBR, cnBL)
+               , width = 4
+             )
+         )
+
+    cnfP = switch
+        osc.sig > 0 and mf.mfi > 0 and mf.mfi > cf.blT.safe_avg() =>  40
+        osc.sig < 0 and mf.mfi < 0 and mf.mfi < cf.brT.safe_avg() => -40
+        osc.sig > 0 and mf.mfi > 0                            =>  20
+        osc.sig < 0 and mf.mfi < 0                            => -20
+        osc.sig > 0 and mf.mfi < 0                            =>   0
+        osc.sig < 0 and mf.mfi > 0                            =>   0
+
+    lb := label.new(
+         x         = bar_index + 3
+       , y         = cnfP
+       , text      = "◆"
+       , color     = na
+       , textcolor = chart.fg_color
+       , size      = size.small
+       , style     = label.style_label_left
+     )
