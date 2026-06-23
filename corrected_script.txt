@@ -1,0 +1,306 @@
+// This work is licensed under a Attribution-NonCommercial-ShareAlike 4.0 International (CC BY-NC-SA 4.0)
+// © Zeiierman (original) – ML adaptation fully corrected (no repaint, no bugs)
+//@version=6
+strategy('Trend Speed Analyzer + ML Signals (Estratégia)', overlay = false, calc_on_every_tick = false, calc_on_order_fills = false, initial_capital = 1000, default_qty_type = strategy.percent_of_equity, default_qty_value = 100)
+
+// ==================== ORIGINAL INPUTS ====================
+max_length       = input.int(50, minval = 1, title = 'Maximum Length', group = 'Dynamic Moving Average')
+accel_multiplier = input.float(5.0, minval = 0.0, step = 1.1, title = 'Accelerator Multiplier', group = 'Dynamic Moving Average')
+
+tbl_            = input.bool(true, title = 'Enable Table', group = 'Wave Analysis')
+lookback_period = input.int(100, minval = 1, step = 1, title = 'Lookback Period', group = 'Wave Analysis')
+
+candle = input.bool(true, title = 'Enable Candles', group = 'Trend Visualization')
+collen = input.int(100, step = 10, minval = 5, title = 'Collection Period', group = 'Trend Visualization')
+
+up_col = input.color(color.lime, title = 'Dynamic Trend', group = 'Trend Visualization', inline = 'Trend')
+dn_col = input.color(color.red, title = '', group = 'Trend Visualization', inline = 'Trend')
+up_hist_col  = input.color(#82ffc3, title = 'Trend Speed Up', group = 'Trend Visualization', inline = 'up')
+up_hist_col_ = input.color(color.lime, title = '', group = 'Trend Visualization', inline = 'up')
+dn_hist_col  = input.color(color.red, title = 'Trend Speed Dn', group = 'Trend Visualization', inline = 'dn')
+dn_hist_col_ = input.color(#f78c8c, title = '', group = 'Trend Visualization', inline = 'dn')
+
+start = input.time(timestamp('1 Jan 2020 00:00 +0000'), title = 'Start Date', group = 'Time Settings', inline = 'startdate')
+timer = input.string('From start', title = 'Timer Option', options = ['Custom', 'From start'], group = 'Time Settings', inline = 'startdate')
+
+// ==================== LUX ALGO OSCILLATOR MATRIX INPUTS ====================
+dW = input.bool(true, "Main Length", inline="1", group="HYPER WAVE")
+mL = input.int(7, "", inline="1", group="HYPER WAVE", minval=5, maxval=21)
+sT = input.string("SMA", "Signal", inline="s", group="HYPER WAVE", options=["SMA", "EMA"])
+sL = input.int(3, "", inline="s", group="HYPER WAVE", minval=2, maxval=10)
+
+Smf = input.bool(true, "Money Flow Length", inline="mfi", group="SMART MONEY FLOW")
+mfL = input.int(35, "", inline="mfi", group="SMART MONEY FLOW", minval=10, maxval=55)
+mfS = input.int(6, "Smooth", inline="mfx", group="SMART MONEY FLOW", minval=2, maxval=10)
+
+// ==================== ML INPUTS ====================
+learning_rate = input.float(0.01, 'Learning Rate', minval = 0.001, maxval = 1.0, step = 0.001, group = 'ML Settings')
+threshold_long = input.float(0.6, 'Long Threshold', minval = 0.5, maxval = 0.99, step = 0.01, group = 'ML Settings')
+threshold_short = input.float(0.4, 'Short Threshold', minval = 0.01, maxval = 0.5, step = 0.01, group = 'ML Settings')
+stop_atr_mult = input.float(1.5, 'Stop ATR Multiplier', minval = 0.5, maxval = 5.0, step = 0.1, group = 'ML Settings')
+use_exits = input.bool(true, 'Use ML Exits', group = 'ML Settings')
+
+// ==================== ORIGINAL DYNAMIC AVERAGE ====================
+counts_diff = nz(ta.change(close))
+max_abs_counts_diff = ta.highest(math.abs(counts_diff), 200)
+counts_diff_norm = (counts_diff + max_abs_counts_diff) / (2 * math.max(max_abs_counts_diff, 0.0001))
+dyn_length = 5 + counts_diff_norm * (max_length - 5)
+
+calc_accel_factor(float counts_diff, float prev_counts_diff) =>
+    delta_counts_diff = math.abs(counts_diff - prev_counts_diff)
+    max_delta_counts_diff = ta.highest(delta_counts_diff, 200)
+    safe_max = max_delta_counts_diff == 0 ? 1 : max_delta_counts_diff
+    accel_factor = delta_counts_diff / safe_max
+    accel_factor
+
+adjust_alpha(float dyn_length, float accel_factor, float accel_multiplier) =>
+    alpha_base = 2 / (dyn_length + 1)
+    alpha = alpha_base * (1 + accel_factor * accel_multiplier)
+    math.min(1, alpha)
+
+accel_factor = calc_accel_factor(counts_diff, nz(counts_diff[1]))
+alpha = adjust_alpha(dyn_length, accel_factor, accel_multiplier)
+
+var float dyn_ema = na
+dyn_ema := na(dyn_ema[1]) ? close : alpha * close + (1 - alpha) * dyn_ema[1]
+
+// ==================== ORIGINAL TREND SPEED / WAVES ====================
+trend = dyn_ema
+bullsrc = close
+bearsrc = close
+
+type TrendData
+    array<float> change
+    array<int> t
+
+StartTime() => time > start
+
+var bullish = TrendData.new(array.new<float>(), array.new<int>())
+var bearish = TrendData.new(array.new<float>(), array.new<int>())
+var x1 = int(na)
+var y1 = float(na)
+var pos = 0
+var speed = 0.0
+c = ta.rma(close, 10)
+o = ta.rma(open, 10)
+
+if na(x1) and StartTime() or na(x1) and timer == 'From start'
+    x1 := bar_index
+    y1 := o
+
+// Call highest/lowest outside the if-scope to avoid history warnings
+lowest_speed = ta.lowest(speed, math.max(1, bar_index - x1))
+highest_speed = ta.highest(speed, math.max(1, bar_index - x1))
+
+if (StartTime() or timer == 'From start') and barstate.isconfirmed
+    if bullsrc > trend and bullsrc[1] <= trend
+        bearish.change.unshift(lowest_speed)
+        bearish.t.unshift(bar_index - x1)
+        x1 := bar_index
+        y1 := bullsrc
+        pos := 1
+        speed := c - o
+    if bearsrc < trend and bearsrc[1] >= trend
+        bullish.change.unshift(highest_speed)
+        bullish.t.unshift(bar_index - x1)
+        x1 := bar_index
+        y1 := bearsrc
+        pos := -1
+        speed := c - o
+speed := speed + c - o
+trendspeed = ta.hma(speed, 5)
+
+// ==================== PLOTS ORIGINAIS ====================
+// Linha de Tendência 1 (Dinâmica)
+colour    = ta.wma(close, 2) > dyn_ema ? up_col : dn_col
+rma_dyn_ema(x, p) => ta.rma(dyn_ema[x], p)
+fillColor = rma_dyn_ema(0, 5) > rma_dyn_ema(1, 5) ? color.new(up_col, 70) : color.new(dn_col, 70)
+p1 = plot(dyn_ema, color = colour, linewidth = 2, title = 'Dynamic Trend', force_overlay = true)
+p2 = plot(ta.rma(hl2, 50), display = display.none, editable = false, force_overlay = true)
+
+min_speed = ta.lowest(speed, collen)
+max_speed = ta.highest(speed, collen)
+normalized_speed = (speed - min_speed) / math.max(max_speed - min_speed, 0.0001)
+speedGradient1 = speed < 0 ? color.from_gradient(normalized_speed, 0.0, 0.5, dn_hist_col, dn_hist_col_) : color.from_gradient(normalized_speed, 0.5, 1.0, up_hist_col, up_hist_col_)
+
+plot(StartTime() or timer == 'From start' ? trendspeed : na, title = 'Trend Speed', color = speedGradient1, style = plot.style_columns)
+plotcandle(open, high, low, close, color = candle ? speedGradient1 : na, wickcolor = candle ? speedGradient1 : na, bordercolor = candle ? speedGradient1 : na, force_overlay = true)
+
+// ==================== MACHINE LEARNING (CORRECTED) ====================
+// Features baseadas na barra ANTERIOR (evita lookahead)
+f1 = trendspeed[1]                             // momentum da barra passada
+f2 = close[1] > dyn_ema[1] ? 1.0 : 0.0         // posição relativa passada
+f3 = ta.rsi(close, 14)[1] / 100.0               // RSI passado normalizado
+f4 = (close[1] - ta.ema(close, 50)[1]) / ta.atr(14)[1] // distância passada da EMA50 em ATRs
+f5 = ta.cci(close, 20)[1] / 200.0 + 0.5         // CCI passado normalizado
+
+float[] features = array.from(f1, f2, f3, f4, f5)
+int num_features = 5  // fixo para clareza
+
+// Inicialização robusta dos pesos
+var float[] weights = array.new_float(num_features)
+if barstate.isfirst
+    for i = 0 to num_features - 1
+        array.set(weights, i, 0.01)
+
+// Funções auxiliares
+sigmoid(float x) => 1.0 / (1.0 + math.exp(-x))
+
+dot(float[] w, float[] x) =>
+    float s = 0.0
+    for i = 0 to array.size(w) - 1
+        s := s + array.get(w, i) * array.get(x, i)
+    s
+
+// Predição atual: probabilidade de que close > close[1]
+float probability = sigmoid(dot(weights, features))
+
+// Label real: movimento da barra corrente
+float actual = close > close[1] ? 1.0 : 0.0
+
+// Atualização online SGD – somente se todos os valores forem válidos e barra confirmada (evita repintura)
+bool all_features_valid = not na(f1) and not na(f2) and not na(f3) and not na(f4) and not na(f5)
+if (StartTime() or timer == 'From start') and all_features_valid and not na(probability) and not na(actual) and barstate.isconfirmed
+    float error = probability - actual   // CORREÇÃO PRINCIPAL
+    for i = 0 to num_features - 1
+        float wi = array.get(weights, i)
+        float xi = array.get(features, i)
+        wi := wi - learning_rate * error * xi
+        array.set(weights, i, wi)
+
+// ==================== LUX ALGO OSCILLATOR MATRIX LOGIC ====================
+lux_st(simple string src, float osc, simple int len) =>
+    float lux_o = switch src
+        "SMA" => ta.sma(osc, len)
+        "EMA" => ta.ema(osc, len)
+    lux_o
+
+calc_osc(simple int len, simple int smt) =>
+    float hi = ta.highest(len)
+    float lo = ta.lowest(len)
+    float av = ta.sma(hl2, len)
+    sig = ta.ema(ta.linreg((close - math.avg(hi, lo, av)) / math.max(hi - lo, 0.0001) * 100, len, 0), smt)
+    [sig]
+
+calc_mfi() =>
+    mfi_val = ta.sma(ta.mfi(hl2, mfL) - 50, mfS)
+    [mfi_val]
+
+[osc_sig] = calc_osc(mL, sL)
+[mf_mfi] = calc_mfi()
+
+// Histórico do MFI do Lux Algo para evitar repintura e cálculo de bandas (cf_blT / cf_brT)
+var cf_blT = array.new<float>(1, na)
+var cf_brT = array.new<float>(1, na)
+var float _mfi_hist = na
+
+if barstate.isconfirmed
+    _mfi_hist := mf_mfi[mfL]
+    if mf_mfi > 0
+        if cf_brT.size() > 1
+            cf_brT.pop()
+        if cf_blT.size() > mfL
+            cf_blT.pop()
+        if mf_mfi > cf_blT.avg()
+            cf_blT.unshift(mf_mfi)
+        else
+            cf_blT.unshift(_mfi_hist > 0 ? _mfi_hist : mf_mfi)
+    else if mf_mfi < 0
+        if cf_blT.size() > 1
+            cf_blT.pop()
+        if cf_brT.size() > mfL
+            cf_brT.pop()
+        if mf_mfi < cf_blT.avg()
+            cf_brT.unshift(mf_mfi)
+        else
+            cf_brT.unshift(_mfi_hist < 0 ? _mfi_hist : mf_mfi)
+
+// ==================== GERAÇÃO DE SINAIS ====================
+var int trade_direction = 0
+var float entry_price = na
+
+// Calculate ATR in the global scope to avoid warnings
+atr_14 = ta.atr(14) // Mantido para outras métricas/features
+
+// Tendência 1 (Dinâmica)
+is_bullish_trend1 = ta.wma(close, 2) > dyn_ema
+is_bearish_trend1 = ta.wma(close, 2) <= dyn_ema
+
+// Confluência Lux Algo Matrix
+lux_bullish = osc_sig > 0 and mf_mfi > 0
+lux_bearish = osc_sig < 0 and mf_mfi < 0
+
+// Confluência Final (Tendência Dinâmica + Lux Algo)
+confluence_bullish = is_bullish_trend1 and lux_bullish
+confluence_bearish = is_bearish_trend1 and lux_bearish
+
+if (StartTime() or timer == 'From start') and barstate.isconfirmed
+    // Entradas e Saídas baseadas na confluência de tendência e matrix
+    if confluence_bullish
+        trade_direction := 1
+        entry_price := trade_direction[1] != 1 ? close : entry_price
+        strategy.entry("Long", strategy.long)
+    else if confluence_bearish
+        trade_direction := -1
+        entry_price := trade_direction[1] != -1 ? close : entry_price
+        strategy.entry("Short", strategy.short)
+
+// Plotagem dos sinais (sem repintura)
+plotshape(trade_direction == 1 and trade_direction[1] != 1, title = 'Long Entry', location = location.belowbar, color = color.lime, style = shape.triangleup, size = size.small, force_overlay = true)
+plotshape(trade_direction == -1 and trade_direction[1] != -1, title = 'Short Entry', location = location.abovebar, color = color.red, style = shape.triangledown, size = size.small, force_overlay = true)
+
+// Como é stop & reverse, as saídas ocorrem na virada da tendência (junto com a entrada inversa)
+plotshape(trade_direction == -1 and trade_direction[1] == 1, title = 'Exit Long', location = location.abovebar, color = color.yellow, style = shape.xcross, size = size.tiny, force_overlay = true)
+plotshape(trade_direction == 1 and trade_direction[1] == -1, title = 'Exit Short', location = location.belowbar, color = color.yellow, style = shape.xcross, size = size.tiny, force_overlay = true)
+
+// ==================== TABELA ORIGINAL ====================
+if barstate.islastconfirmedhistory and tbl_ and bullish.change.size() > 0 and bearish.change.size() > 0
+    bullish_recent = bullish.change.slice(0, math.min(lookback_period, bullish.change.size()))
+    bearish_recent = bearish.change.slice(0, math.min(lookback_period, bearish.change.size()))
+
+    bull_max = bullish_recent.max()
+    bear_max = bearish_recent.min()
+    bull_avg = nz(bullish_recent.avg(), 1.0)
+    bear_avg = nz(bearish_recent.avg(), -1.0)
+
+    safe_bear_avg = bear_avg == 0 ? 0.0001 : math.abs(bear_avg)
+    safe_bear_max = bear_max == 0 ? -0.0001 : math.abs(bear_max)
+
+    wave_size_ratio_avg = bull_avg / safe_bear_avg
+    wave_size_text_avg = str.tostring(math.round(wave_size_ratio_avg, 2)) + 'x'
+    wave_size_color_avg = wave_size_ratio_avg > 0 ? color.lime : color.red
+
+    wave_size_ratio_max = bull_max / safe_bear_max
+    wave_size_text_max = str.tostring(math.round(wave_size_ratio_max, 2)) + 'x'
+    wave_size_color_max = wave_size_ratio_max > 0 ? color.lime : color.red
+
+    dominance_avg_value = bull_avg - math.abs(bear_avg)
+    dominance_avg_text = dominance_avg_value > 0 ? 'Bullish +' + str.tostring(math.round(wave_size_ratio_avg, 2)) + 'x' : 'Bearish -' + str.tostring(math.round(1 / math.max(wave_size_ratio_avg, 0.0001), 2)) + 'x'
+    dominance_avg_color = dominance_avg_value > 0 ? color.lime : color.red
+
+    dominance_max_value = bull_max - math.abs(bear_max)
+    dominance_max_text = dominance_max_value > 0 ? 'Bullish +' + str.tostring(math.round(wave_size_ratio_max, 2)) + 'x' : 'Bearish -' + str.tostring(math.round(1 / math.max(wave_size_ratio_max, 0.0001), 2)) + 'x'
+    dominance_max_color = dominance_max_value > 0 ? color.lime : color.red
+
+    current_wave = speed
+    current_wave_color = current_wave > 0 ? color.lime : color.red
+
+    current_ratio_avg = current_wave > 0 ? current_wave / math.max(bull_avg, 0.0001) : current_wave / safe_bear_avg
+    current_ratio_max = current_wave > 0 ? current_wave / math.max(bull_max, 0.0001) : current_wave / safe_bear_max
+
+    current_text_avg = str.tostring(math.round(current_ratio_avg, 2)) + 'x'
+    current_text_max = str.tostring(math.round(current_ratio_max, 2)) + 'x'
+
+    current_color_avg = current_ratio_avg > 0 ? color.lime : color.red
+    current_color_max = current_ratio_max > 0 ? color.lime : color.red
+
+    var tbl = table.new(position.top_right, 3, 3, force_overlay = true)
+    table.cell(tbl, 0, 0, '', text_color = chart.fg_color)
+    table.cell(tbl, 0, 1, 'Average Wave', text_color = chart.fg_color)
+    table.cell(tbl, 0, 2, 'Max Wave', text_color = chart.fg_color)
+    table.cell(tbl, 1, 0, 'Current Wave Ratio', text_color = chart.fg_color)
+    table.cell(tbl, 1, 1, current_text_avg, text_color = current_color_avg)
+    table.cell(tbl, 1, 2, current_text_max, text_color = current_color_max)
+    table.cell(tbl, 2, 0, 'Dominance', text_color = chart.fg_color)
+    table.cell(tbl, 2, 1, dominance_avg_text, text_color = dominance_avg_color)
+    table.cell(tbl, 2, 2, dominance_max_text, text_color = dominance_max_color)
